@@ -18,10 +18,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
-#include <errno.h>
 #include <memory>
 #include <unistd.h>
 #include <fstream>
@@ -45,14 +45,14 @@
 //-------------------------------------------------------------------
 // Symbols
 //-------------------------------------------------------------------
-static const char EMPTY_PAYLOAD_HASH[]              = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-static const char EMPTY_MD5_BASE64_HASH[]           = "1B2M2Y8AsgTpgAmY7PhCfg==";
+static constexpr char EMPTY_PAYLOAD_HASH[]              = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+static constexpr char EMPTY_MD5_BASE64_HASH[]           = "1B2M2Y8AsgTpgAmY7PhCfg==";
 
 //-------------------------------------------------------------------
 // Class S3fsCurl
 //-------------------------------------------------------------------
-static const int MULTIPART_SIZE                     = 10 * 1024 * 1024;
-static const int GET_OBJECT_RESPONSE_LIMIT          = 1024;
+static constexpr int MULTIPART_SIZE                     = 10 * 1024 * 1024;
+static constexpr int GET_OBJECT_RESPONSE_LIMIT          = 1024;
 
 // [NOTE] about default mime.types file
 // If no mime.types file is specified in the mime option, s3fs
@@ -65,8 +65,8 @@ static const int GET_OBJECT_RESPONSE_LIMIT          = 1024;
 // If the mime.types file is not found, s3fs will exit with an
 // error.
 //
-static const char DEFAULT_MIME_FILE[]               = "/etc/mime.types";
-static const char SPECIAL_DARWIN_MIME_FILE[]        = "/etc/apache2/mime.types";
+static constexpr char DEFAULT_MIME_FILE[]               = "/etc/mime.types";
+static constexpr char SPECIAL_DARWIN_MIME_FILE[]        = "/etc/apache2/mime.types";
 
 // [NOTICE]
 // This symbol is for libcurl under 7.23.0
@@ -83,9 +83,6 @@ static const char SPECIAL_DARWIN_MIME_FILE[]        = "/etc/apache2/mime.types";
 //-------------------------------------------------------------------
 // Class S3fsCurl
 //-------------------------------------------------------------------
-const long       S3fsCurl::S3FSCURL_RESPONSECODE_NOTSET;
-const long       S3fsCurl::S3FSCURL_RESPONSECODE_FATAL_ERROR;
-const int        S3fsCurl::S3FSCURL_PERFORM_RESULT_NOTSET;
 pthread_mutex_t  S3fsCurl::curl_warnings_lock;
 pthread_mutex_t  S3fsCurl::curl_handles_lock;
 S3fsCurl::callback_locks_t S3fsCurl::callback_locks;
@@ -2139,7 +2136,10 @@ bool S3fsCurl::RemakeHandle()
     // rewind file
     struct stat st;
     if(b_infile){
-        rewind(b_infile);
+        if(-1 == fseek(b_infile, 0, SEEK_SET)){
+            S3FS_PRN_WARN("Could not reset position(fd=%d)", fileno(b_infile));
+            return false;
+        }
         if(-1 == fstat(fileno(b_infile), &st)){
             S3FS_PRN_WARN("Could not get file stat(fd=%d)", fileno(b_infile));
             return false;

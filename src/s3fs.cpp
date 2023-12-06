@@ -19,16 +19,18 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <errno.h>
 #include <memory>
 #include <set>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/types.h>
 #include <getopt.h>
-
+#include <iostream>
+#include <vector>
 #include "common.h"
 #include "s3fs.h"
 #include "s3fs_logger.h"
@@ -205,15 +207,13 @@ static int s3fs_removexattr(const char* path, const char* name);
 class MpStatFlag
 {
     private:
-        mutable pthread_mutex_t flag_lock;
-        bool                    is_lock_init;
-        bool                    has_mp_stat;
+        std::atomic<bool>       has_mp_stat;
 
     public:
-        MpStatFlag();
+        MpStatFlag() = default;
         MpStatFlag(const MpStatFlag&) = delete;
         MpStatFlag(MpStatFlag&&) = delete;
-        ~MpStatFlag();
+        ~MpStatFlag() = default;
         MpStatFlag& operator=(const MpStatFlag&) = delete;
         MpStatFlag& operator=(MpStatFlag&&) = delete;
 
@@ -221,46 +221,14 @@ class MpStatFlag
         bool Set(bool flag);
 };
 
-MpStatFlag::MpStatFlag() : is_lock_init(false), has_mp_stat(false)
-{
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-
-    int result;
-    if(0 != (result = pthread_mutex_init(&flag_lock, &attr))){
-        S3FS_PRN_CRIT("failed to init flag_lock: %d", result);
-        abort();
-    }
-    is_lock_init = true;
-}
-
-MpStatFlag::~MpStatFlag()
-{
-    if(is_lock_init){
-        int result;
-        if(0 != (result = pthread_mutex_destroy(&flag_lock))){
-            S3FS_PRN_CRIT("failed to destroy flag_lock: %d", result);
-            abort();
-        }
-        is_lock_init = false;
-    }
-}
-
 bool MpStatFlag::Get()
 {
-    AutoLock auto_lock(&flag_lock);
     return has_mp_stat;
 }
 
 bool MpStatFlag::Set(bool flag)
 {
-    AutoLock auto_lock(&flag_lock);
-    bool old    = has_mp_stat;
-    has_mp_stat = flag;
-    return old;
+    return has_mp_stat.exchange(flag);
 }
 
 // whether the stat information file for mount point exists
@@ -273,7 +241,7 @@ class SyncFiller
 {
     private:
         mutable pthread_mutex_t filler_lock;
-        bool                    is_lock_init;
+        bool                    is_lock_init = false;
         void*                   filler_buff;
         fuse_fill_dir_t         filler_func;
         std::set<std::string>   filled;
@@ -290,7 +258,7 @@ class SyncFiller
         int SufficiencyFill(const std::vector<std::string>& pathlist);
 };
 
-SyncFiller::SyncFiller(void* buff, fuse_fill_dir_t filler) : is_lock_init(false), filler_buff(buff), filler_func(filler)
+SyncFiller::SyncFiller(void* buff, fuse_fill_dir_t filler) : filler_buff(buff), filler_func(filler)
 {
     if(!filler_buff || !filler_func){
         S3FS_PRN_CRIT("Internal error: SyncFiller constructor parameter is critical value.");
@@ -1035,7 +1003,11 @@ static int s3fs_getattr(const char* _path, struct stat* stbuf)
     WTF8_ENCODE(path)
     int result;
 
+#if defined(__APPLE__)
+    FUSE_CTX_DBG("[path=%s]", path);
+#else
     FUSE_CTX_INFO("[path=%s]", path);
+#endif
 
     // check parent directory attribute.
     if(0 != (result = check_parent_object_access(path, X_OK))){
@@ -1054,6 +1026,9 @@ static int s3fs_getattr(const char* _path, struct stat* stbuf)
             if(ent->GetStats(tmpstbuf)){
                 stbuf->st_size = tmpstbuf.st_size;
             }
+        }
+        if(0 == strcmp(path, "/")){
+            stbuf->st_size = 4096;
         }
         stbuf->st_blksize = 4096;
         stbuf->st_blocks  = get_blocks(stbuf->st_size);
@@ -2027,6 +2002,16 @@ static int s3fs_chmod(const char* _path, mode_t mode)
 
                 // If there is data in the Stats cache, update the Stats cache.
                 StatCache::getStatCacheData()->UpdateMetaStats(strpath, updatemeta);
+
+                // [NOTE]
+                // There are cases where this function is called during the process of
+                // creating a new file (before uploading).
+                // In this case, a temporary cache exists in the Stat cache.
+                // So we need to update the cache, if it exists. (see. s3fs_create and s3fs_utimens)
+                //
+                if(!StatCache::getStatCacheData()->AddStat(strpath, updatemeta, false, true)){
+                    return -EIO;
+                }
             }
         }
         if(need_put_header){
@@ -2232,6 +2217,16 @@ static int s3fs_chown(const char* _path, uid_t uid, gid_t gid)
 
                 // If there is data in the Stats cache, update the Stats cache.
                 StatCache::getStatCacheData()->UpdateMetaStats(strpath, updatemeta);
+
+                // [NOTE]
+                // There are cases where this function is called during the process of
+                // creating a new file (before uploading).
+                // In this case, a temporary cache exists in the Stat cache.
+                // So we need to update the cache, if it exists. (see. s3fs_create and s3fs_utimens)
+                //
+                if(!StatCache::getStatCacheData()->AddStat(strpath, updatemeta, false, true)){
+                    return -EIO;
+                }
             }
         }
         if(need_put_header){
@@ -2562,6 +2557,21 @@ static int s3fs_utimens(const char* _path, const struct timespec ts[2])
 
                 // If there is data in the Stats cache, update the Stats cache.
                 StatCache::getStatCacheData()->UpdateMetaStats(strpath, updatemeta);
+
+                // [NOTE]
+                // There are cases where this function is called during the process of
+                // creating a new file (before uploading).
+                // In this case, a temporary cache exists in the Stat cache.(see s3fs_create)
+                // So we need to update the cache, if it exists.
+                //
+                // Previously, the process of creating a new file was to update the
+                // file content after first uploading the file, but now the file is
+                // not created until flushing.
+                // So we need to create a temporary Stat cache for it.
+                //
+                if(!StatCache::getStatCacheData()->AddStat(strpath, updatemeta, false, true)){
+                    return -EIO;
+                }
 
             }else{
                 S3FS_PRN_INFO("meta is not pending, but need to keep current mtime.");
@@ -2896,6 +2906,43 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
     return 0;
 }
 
+
+// 사용량 통계를 저장하기 위한 구조체
+struct UsageStatistics {
+    int uploadCount;
+    int downloadCount;
+    long long totalUploadedBytes;
+    long long totalDownloadedBytes;
+
+    UsageStatistics() : uploadCount(0), downloadCount(0), totalUploadedBytes(0), totalDownloadedBytes(0) {}
+};
+
+// 통계를 저장할 전역 변수
+UsageStatistics usageStats;
+
+// 파일 업로드 시 통계 업데이트 함수
+void updateUploadStatistics(long long uploadedBytes) {
+    usageStats.uploadCount++;
+    usageStats.totalUploadedBytes += uploadedBytes;
+    
+}
+
+// 파일 다운로드 시 통계 업데이트 함수
+void updateDownloadStatistics(long long downloadedBytes) {
+    usageStats.downloadCount++;
+    usageStats.totalDownloadedBytes += downloadedBytes;
+}
+
+void someFunction() {
+    // 통계 출력
+    
+    printUsageStatistics();
+
+}
+
+
+
+
 static int s3fs_read(const char* _path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi)
 {
     WTF8_ENCODE(path)
@@ -2920,6 +2967,7 @@ static int s3fs_read(const char* _path, char* buf, size_t size, off_t offset, st
     if(0 > (res = ent->Read(static_cast<int>(fi->fh), buf, offset, size, false))){
         S3FS_PRN_WARN("failed to read file(%s). result=%zd", path, res);
     }
+    updateDownloadStatistics(size);
 
     return static_cast<int>(res);
 }
@@ -2954,6 +3002,8 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
             S3FS_PRN_WARN("could not punching HOLEs to a cache file, but continue.");
         }
     }
+    updateUploadStatistics(size);
+    someFunction();
 
     return static_cast<int>(res);
 }
@@ -3255,7 +3305,7 @@ static std::unique_ptr<S3fsCurl> multi_head_retry_callback(S3fsCurl* s3fscurl)
 
 static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf, fuse_fill_dir_t filler)
 {
-    S3fsMultiCurl curlmulti(S3fsCurl::GetMaxMultiRequest());
+    S3fsMultiCurl curlmulti(S3fsCurl::GetMaxMultiRequest(), true);      // [NOTE] run all requests to completion even if some requests fail.
     s3obj_list_t  headlist;
     int           result = 0;
 
@@ -3414,6 +3464,14 @@ static int s3fs_readdir(const char* _path, void* buf, fuse_fill_dir_t filler, of
     filler(buf, "..", nullptr, 0);
     if(head.IsEmpty()){
         return 0;
+    }
+
+    // 사용량 통계 출력 함수
+    void printUsageStatistics() {
+        std::cout << "Upload Count: " << usageStats.uploadCount << std::endl;
+        std::cout << "Download Count: " << usageStats.downloadCount << std::endl;
+        std::cout << "Total Uploaded Bytes: " << usageStats.totalUploadedBytes << " bytes" << std::endl;
+        std::cout << "Total Downloaded Bytes: " << usageStats.totalDownloadedBytes << " bytes" << std::endl;
     }
 
     // Send multi head request for stats caching.
@@ -3929,6 +3987,16 @@ static int s3fs_setxattr(const char* path, const char* name, const char* value, 
 
             // If there is data in the Stats cache, update the Stats cache.
             StatCache::getStatCacheData()->UpdateMetaStats(strpath, updatemeta);
+
+            // [NOTE]
+            // There are cases where this function is called during the process of
+            // creating a new file (before uploading).
+            // In this case, a temporary cache exists in the Stat cache.
+            // So we need to update the cache, if it exists. (see. s3fs_create and s3fs_utimens)
+            //
+            if(!StatCache::getStatCacheData()->AddStat(strpath, updatemeta, false, true)){
+                return -EIO;
+            }
         }
     }
     if(need_put_header){
@@ -3956,7 +4024,11 @@ static int s3fs_getxattr(const char* path, const char* name, char* value, size_t
 static int s3fs_getxattr(const char* path, const char* name, char* value, size_t size)
 #endif
 {
+#if defined(__APPLE__)
+    FUSE_CTX_DBG("[path=%s][name=%s][value=%p][size=%zu]", path, name, value, size);
+#else
     FUSE_CTX_INFO("[path=%s][name=%s][value=%p][size=%zu]", path, name, value, size);
+#endif
 
     if(!path || !name){
         return -EIO;
@@ -5487,7 +5559,7 @@ int main(int argc, char* argv[])
     time_t incomp_abort_time = (24 * 60 * 60);
     S3fsLog singletonLog;
 
-    static const struct option long_opts[] = {
+    static constexpr struct option long_opts[] = {
         {"help",                 no_argument,       nullptr, 'h'},
         {"version",              no_argument,       nullptr, 0},
         {"debug",                no_argument,       nullptr, 'd'},

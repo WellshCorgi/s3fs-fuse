@@ -18,15 +18,15 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <pthread.h>
 #include <unistd.h>
 #include <syslog.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <string.h>
 #include <nss.h>
 #include <pk11pub.h>
 #include <hasht.h>
@@ -44,7 +44,7 @@
 //-------------------------------------------------------------------
 const char* s3fs_crypt_lib_name()
 {
-    static const char version[] = "NSS";
+    static constexpr char version[] = "NSS";
 
     return version;
 }
