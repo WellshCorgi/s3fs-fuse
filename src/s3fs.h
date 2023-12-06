@@ -59,6 +59,8 @@
 #define S3FS_MALLOCTRIM(pad)
 #endif  // S3FS_MALLOC_TRIM
 
+void printUsageStatistics();
+
 #define S3FS_XMLFREEDOC(doc) \
         do{ \
           xmlFreeDoc(doc); \

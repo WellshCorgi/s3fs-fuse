@@ -3466,13 +3466,7 @@ static int s3fs_readdir(const char* _path, void* buf, fuse_fill_dir_t filler, of
         return 0;
     }
 
-    // 사용량 통계 출력 함수
-    void printUsageStatistics() {
-        std::cout << "Upload Count: " << usageStats.uploadCount << std::endl;
-        std::cout << "Download Count: " << usageStats.downloadCount << std::endl;
-        std::cout << "Total Uploaded Bytes: " << usageStats.totalUploadedBytes << " bytes" << std::endl;
-        std::cout << "Total Downloaded Bytes: " << usageStats.totalDownloadedBytes << " bytes" << std::endl;
-    }
+    
 
     // Send multi head request for stats caching.
     std::string strpath = path;
@@ -3485,6 +3479,16 @@ static int s3fs_readdir(const char* _path, void* buf, fuse_fill_dir_t filler, of
     S3FS_MALLOCTRIM(0);
 
     return result;
+}
+
+
+
+// 사용량 통계 출력 함수
+void printUsageStatistics() {
+    std::cout << "Upload Count: " << usageStats.uploadCount << std::endl;
+    std::cout << "Download Count: " << usageStats.downloadCount << std::endl;
+    std::cout << "Total Uploaded Bytes: " << usageStats.totalUploadedBytes << " bytes" << std::endl;
+    std::cout << "Total Downloaded Bytes: " << usageStats.totalDownloadedBytes << " bytes" << std::endl;
 }
 
 static int list_bucket(const char* path, S3ObjList& head, const char* delimiter, bool check_content_only)
